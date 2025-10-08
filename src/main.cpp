@@ -9,6 +9,8 @@
 // DS18B20 data pin
 #define ONE_WIRE_BUS 4
 
+#define RELAY_FIRST 14
+
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 
@@ -16,11 +18,13 @@ WiFiClient conClient;
 PubSubClient client(conClient);
 
 const char *mqtt_broker = "192.168.1.154";
-const char *topic = "esp32/temp";
+const char *topic1 = "esp32/temp";
+const char *topic2 = "esp32/relay";
 const char *id = "esp32_Client";
 const int mqtt_port = 1883;
 
-long cooldown = 0;
+bool relay = false;
+float last_temp = 0;
 
 static bool eth_connected = false;
 
@@ -51,7 +55,8 @@ void setup(){
 
   // Initialize DS18B20
   sensors.begin();
-
+  pinMode(RELAY_FIRST, OUTPUT);
+  digitalWrite(RELAY_FIRST, HIGH);
   //ETH.begin();
   #if ESP_ARDUINO_VERSION_MAJOR >= 3
   ETH.begin(ETH_PHY_LAN8720, 1, 23, 18, 16, ETH_CLOCK_GPIO0_IN);
@@ -72,7 +77,8 @@ void reconnect(){
     if(client.connect(id))
     {
       Serial.println("connected");
-      client.subscribe(topic);
+      client.subscribe(topic1);
+      client.subscribe(topic2);
     }
     else
     {
@@ -102,8 +108,23 @@ void loop(){
   else 
   {
     Serial.printf("Temperature: %.2f °C\n", temperatureC);
-    client.publish(topic,tempString);
+    client.publish(topic1,tempString);
+
+
+    bool new_relay = (temperatureC > 26);
+
+    if(new_relay != relay)
+    {
+      relay = new_relay;
+      char relayMsg[32];
+      
+      digitalWrite(RELAY_FIRST, relay ? LOW : HIGH);
+      Serial.printf("Relay: %s\n", relay ? "On" : "Off");
+      snprintf(relayMsg, sizeof(relayMsg), "Relay: %s", relay ? "On" : "Off");
+      client.publish(topic2,relayMsg);
+    }
   }
+
 
   delay(10000);
 }
