@@ -5,6 +5,8 @@
 #include <DallasTemperature.h>
 #include <ETH.h>
 #include <PubSubClient.h>
+#include <ESPAsyncWebServer.h>
+#include <AsyncTCP.h>
 
 // DS18B20 data pin
 #define ONE_WIRE_BUS 4
@@ -27,6 +29,10 @@ bool relay = false;
 float last_temp = 0;
 
 static bool eth_connected = false;
+
+AsyncWebServer server(80);
+
+
 
 void testClient(const char * host, uint16_t port)
 {
@@ -64,29 +70,103 @@ void setup(){
   ETH.begin(1, 16, 23, 18, ETH_PHY_LAN8720, ETH_CLOCK_GPIO0_IN);
   #endif
   Serial.println("Ethernet starting");
+  Serial.println(ETH.localIP());
 
   client.setServer(mqtt_broker, mqtt_port);
+
+
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    String html = "<html><head><meta name='viewport' content='width=device-width, initial-scale=1'>"
+                  "<style>"
+                  "body{font-family:Arial;text-align:center;background:#111;color:#eee;}"
+                  "button{font-size:22px;padding:15px 30px;margin:10px;border:none;border-radius:8px;cursor:pointer;}"
+                  ".on{background:#2ecc71;color:white;}"
+                  ".off{background:#e74c3c;color:white;}"
+                  "</style></head><body>";
+    html += "<h1>ESP32 Relay Control</h1>";
+    html += "<p>Relay is <b>" + String(relay ? "ON" : "OFF") + "</b></p>";
+    html += "<button class='on' onclick=\"fetch('/on')\">Turn ON</button>";
+    html += "<button class='off' onclick=\"fetch('/off')\">Turn OFF</button>";
+    html += "</body></html>";
+    request->send(200, "text/html", html);
+  });
+
+  server.on("/on", HTTP_GET, [](AsyncWebServerRequest *request){
+    relay = true;
+    digitalWrite(RELAY_FIRST, LOW);
+    request->send(200, "text/plain", "Relay ON");
+  });
+
+  server.on("/off", HTTP_GET, [](AsyncWebServerRequest *request){
+    relay = false;
+    digitalWrite(RELAY_FIRST, HIGH);
+    request->send(200, "text/plain", "Relay OFF");
+  });
+
+  delay(20000);
+  server.begin();
 }
 
-void reconnect(){
+void reconnect() {
+  static bool connecting = false;
 
-  while(!client.connected())
+  if (client.connected() || connecting)
   {
-    Serial.println("Connecting to MQTT");
+    return;
+  } 
+  connecting = true;
+  Serial.println("Reconnecting");
+
+  if (client.connect(id)) 
+  {
+    Serial.println("Connected");
+    client.subscribe(topic1);
+    client.subscribe(topic2);
+  } 
+  else 
+  {
+    Serial.println("failed to connect"); 
+    Serial.print(client.state()); 
+    Serial.println("retrying to connect");
+  }
+
+  connecting = false;
+}
+
+void temp(){
+  sensors.requestTemperatures();
+
+  float temperatureC = sensors.getTempCByIndex(0);
+
+  if (temperatureC == DEVICE_DISCONNECTED_C) 
+  {
+    Serial.println("Error: DS18B20 not found!");
+    return;
+  } 
+
+  Serial.printf("Temperature: %.2f °C\n", temperatureC);
+  bool new_relay = (temperatureC > 26);
+
+  if(new_relay != relay)
+  {
+    relay = new_relay;
     
-    if(client.connect(id))
+    digitalWrite(RELAY_FIRST, relay ? LOW : HIGH);
+    Serial.printf("Relay: %s\n", relay ? "On" : "Off");
+
+    if(client.connected())
     {
-      Serial.println("connected");
-      client.subscribe(topic1);
-      client.subscribe(topic2);
+      char relayMsg[32];
+      snprintf(relayMsg, sizeof(relayMsg), "Relay: %s", relay ? "On" : "Off");
+      client.publish(topic2,relayMsg);
     }
-    else
-    {
-      Serial.println("failed to connect");
-      Serial.print(client.state());
-      Serial.println("retrying to connect");
-      delay(5000);
-    }
+  }
+  if(client.connected())
+  {
+    char tempString[8];
+    dtostrf(temperatureC, 1, 2, tempString);
+
+    client.publish(topic1,tempString);
   }
 }
 
@@ -95,35 +175,11 @@ void loop(){
   {
     reconnect();
   }
-  client.loop();
-
-  sensors.requestTemperatures();
-  float temperatureC = sensors.getTempCByIndex(0);
-  char tempString[8];
-  dtostrf(temperatureC, 1, 2, tempString);
-  if (temperatureC == DEVICE_DISCONNECTED_C) 
-  {
-    Serial.println("Error: DS18B20 not found!");
-  } 
-  else 
-  {
-    Serial.printf("Temperature: %.2f °C\n", temperatureC);
-    client.publish(topic1,tempString);
-
-
-    bool new_relay = (temperatureC > 26);
-
-    if(new_relay != relay)
-    {
-      relay = new_relay;
-      char relayMsg[32];
-      
-      digitalWrite(RELAY_FIRST, relay ? LOW : HIGH);
-      Serial.printf("Relay: %s\n", relay ? "On" : "Off");
-      snprintf(relayMsg, sizeof(relayMsg), "Relay: %s", relay ? "On" : "Off");
-      client.publish(topic2,relayMsg);
-    }
+  if (client.connected()) {
+    client.loop();
   }
+
+  temp();
 
 
   delay(10000);
