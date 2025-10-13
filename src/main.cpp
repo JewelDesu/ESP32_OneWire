@@ -10,11 +10,15 @@
 
 // DS18B20 data pin
 #define ONE_WIRE_BUS 4
-
-#define RELAY_FIRST 14
+#define RELAY_COUNT 4
 
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
+
+DeviceAddress sensor1 = { 0x28, 0x80, 0xC9, 0x4A, 0x4, 0x0, 0x0, 0x40 };
+DeviceAddress sensor2 = { 0x28, 0xBB, 0xEA, 0x4A, 0x4, 0x0, 0x0, 0xE3 };
+DeviceAddress sensor3= { 0x28, 0xF3, 0xD5, 0x4A, 0x4, 0x0, 0x0, 0xDC };
+DeviceAddress sensor4= { 0x28, 0x4B, 0xE2, 0x4A, 0x4, 0x0, 0x0, 0xAF };
 
 WiFiClient conClient;
 PubSubClient client(conClient);
@@ -30,9 +34,111 @@ float last_temp = 0;
 
 static bool eth_connected = false;
 
+int relayIO[RELAY_COUNT] = {14,15,17,5};
+bool relayStates[RELAY_COUNT] = {false, false, false, false};
+bool autoEnabled[RELAY_COUNT] = {false, false, false, false};
+float tempTriggersDown[RELAY_COUNT] = {20.0, 20.0, 20.0, 20.0};
+float tempTriggersUp[RELAY_COUNT] = {26.0, 26.0, 26.0, 26.0};
+//bool autoActive = false;
+
+const char* PARAM_INPUT_RELAY  = "relay";  
+const char* PARAM_INPUT_STATE  = "state";
+const char* PARAM_INPUT_AUTO  = "enable_auto_input";
+const char* PARAM_INPUT_TEMP = "temp";
+
+String enableAutoChecked = "";
+String inputMessage3 = "true";
+
+
+
 AsyncWebServer server(80);
 
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE HTML><html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    html {font-family: Arial; display: inline-block; text-align: center;}
+    h2 {font-size: 2.0rem;}
+    body {max-width: 700px; margin:0px auto; padding: 20px;}
+    .switch {position: relative; display: inline-block; width: 100px; height: 54px} 
+    .switch input {display:none}
+    .slider {position:absolute; top:0; left:0; right:0; bottom:0; background-color:#ccc; border-radius:34px}
+    .slider:before {position:absolute; content:""; height:40px; width:40px; left:7px; bottom:7px; background-color:white; transition:.4s; border-radius:50px}
+    input:checked+.slider {background-color:#2196F3}
+    input:checked+.slider:before {transform:translateX(46px)}
+    input[type=number]{width:80px; font-size:1.1rem; text-align:center;}
+  </style>
+</head>
+<body>
+  <h2>ESP32 ETH Temp Automation</h2>
+  %BUTTONPLACEHOLDER%
 
+  <form action="/get">
+    <table border="1" style="margin:auto;">
+      <tr><th>Relay</th><th>Trigger Low °C</th><th>Trigger High °C</th><th>Automation</th></tr>
+      %TEMPINPUTS%
+    </table>
+    <br>
+    <input type="submit" value="Save">
+  </form>
+
+<script>
+function toggleCheckbox(element){
+  var xhr = new XMLHttpRequest();
+  xhr.open("GET", "/update?relay="+element.id+"&state="+(element.checked?1:0), true);
+  xhr.send();
+}
+</script>
+</body>
+</html>
+)rawliteral";
+
+bool getRelayState(int index) 
+{
+  return digitalRead(relayIO[index]) == LOW;
+}
+
+String relayState(int numRelay) 
+{
+  return getRelayState(numRelay - 1) ? "checked" : "";
+}
+
+String makeTempInputs() {
+  String inputs = "";
+  for (int i = 0; i < RELAY_COUNT; i++) {
+    inputs += "<tr>";
+    inputs += "<td>Relay " + String(i + 1) + "</td>";
+    inputs += "<td><input type='number' step='0.1' name='tempLow" + String(i + 1) + "' value='" + String(tempTriggersDown[i]) + "'></td>";
+    inputs += "<td><input type='number' step='0.1' name='tempHigh" + String(i + 1) + "' value='" + String(tempTriggersUp[i]) + "'></td>";
+    inputs += "<td><input type='checkbox' name='auto" + String(i + 1) + "' " + (autoEnabled[i] ? "checked" : "") + "></td>";
+    inputs += "</tr>";
+  }
+  return inputs;
+}
+
+String processor(const String& var){
+  //Serial.println(var);
+  if(var == "BUTTONPLACEHOLDER")
+  {
+    String buttons ="";
+    for(int i=1; i<=RELAY_COUNT; i++)
+    {
+      String relayStateValue = relayState(i);
+      buttons+= "<h4>Relay #" + String(i) + " - GPIO " + relayIO[i-1] + "</h4><label class=\"switch\"><input type=\"checkbox\" onchange=\"toggleCheckbox(this)\" id=\"" + String(i) + "\" "+ relayStateValue +"><span class=\"slider\"></span></label>";
+    }
+    return buttons;
+  }
+  else if(var == "ENABLE_AUTO_INPUT")
+  {
+    return enableAutoChecked;
+  }
+  else if(var == "TEMPINPUTS"){
+    return makeTempInputs();
+  }
+
+  return String();
+}
 
 void testClient(const char * host, uint16_t port)
 {
@@ -40,13 +146,16 @@ void testClient(const char * host, uint16_t port)
   Serial.println(host);
 
   WiFiClient client;
-  if (!client.connect(host, port)) {
+  if (!client.connect(host, port)) 
+  {
     Serial.println("connection failed");
     return;
   }
+
   client.printf("GET / HTTP/1.1\r\nHost: %s\r\n\r\n", host);
   while (client.connected() && !client.available());
-  while (client.available()) {
+  while (client.available()) 
+  {
     Serial.write(client.read());
   }
 
@@ -61,9 +170,16 @@ void setup(){
 
   // Initialize DS18B20
   sensors.begin();
-  pinMode(RELAY_FIRST, OUTPUT);
-  digitalWrite(RELAY_FIRST, HIGH);
+  //pinMode(RELAY_FIRST, OUTPUT);
+  //digitalWrite(RELAY_FIRST, HIGH);
   //ETH.begin();
+
+  for (int i = 0; i < RELAY_COUNT; i++) 
+  {
+    pinMode(relayIO[i], OUTPUT);
+    digitalWrite(relayIO[i], HIGH);
+  }
+
   #if ESP_ARDUINO_VERSION_MAJOR >= 3
   ETH.begin(ETH_PHY_LAN8720, 1, 23, 18, 16, ETH_CLOCK_GPIO0_IN);
   #else
@@ -75,33 +191,62 @@ void setup(){
   client.setServer(mqtt_broker, mqtt_port);
 
 
-    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-    String html = "<html><head><meta name='viewport' content='width=device-width, initial-scale=1'>"
-                  "<style>"
-                  "body{font-family:Arial;text-align:center;background:#111;color:#eee;}"
-                  "button{font-size:22px;padding:15px 30px;margin:10px;border:none;border-radius:8px;cursor:pointer;}"
-                  ".on{background:#2ecc71;color:white;}"
-                  ".off{background:#e74c3c;color:white;}"
-                  "</style></head><body>";
-    html += "<h1>ESP32 Relay Control</h1>";
-    html += "<p>Relay is <b>" + String(relay ? "ON" : "OFF") + "</b></p>";
-    html += "<button class='on' onclick=\"fetch('/on')\">Turn ON</button>";
-    html += "<button class='off' onclick=\"fetch('/off')\">Turn OFF</button>";
-    html += "</body></html>";
-    request->send(200, "text/html", html);
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
+  {
+  request->send(200, "text/html", index_html, processor);
   });
 
-  server.on("/on", HTTP_GET, [](AsyncWebServerRequest *request){
-    relay = true;
-    digitalWrite(RELAY_FIRST, LOW);
-    request->send(200, "text/plain", "Relay ON");
+  server.on("/update", HTTP_GET, [] (AsyncWebServerRequest *request) 
+  {
+    if (request->hasParam(PARAM_INPUT_RELAY) && request->hasParam(PARAM_INPUT_STATE)) 
+    {
+    int r = request->getParam(PARAM_INPUT_RELAY)->value().toInt() - 1;
+    int s = request->getParam(PARAM_INPUT_STATE)->value().toInt();
+
+    // Active LOW relay
+    digitalWrite(relayIO[r], s ? LOW : HIGH);
+    relayStates[r] = getRelayState(r);
+
+    Serial.printf("Manual Relay %d -> %s\n", r + 1, relayStates[r] ? "ON" : "OFF");
+
+    char relayMsg[32];
+    snprintf(relayMsg, sizeof(relayMsg), "Manual Relay %d -> %s\n", r + 1, relayStates[r] ? "ON" : "OFF");
+    client.publish(topic2,relayMsg);
+    }
+    request->send(200, "text/plain", "OK");
   });
 
-  server.on("/off", HTTP_GET, [](AsyncWebServerRequest *request){
-    relay = false;
-    digitalWrite(RELAY_FIRST, HIGH);
-    request->send(200, "text/plain", "Relay OFF");
+  server.on("/get", HTTP_GET, [](AsyncWebServerRequest *request)
+  {
+    // automation
+
+  for (int i = 0; i < RELAY_COUNT; i++) 
+  {
+    String lowParam = "tempLow" + String(i + 1);
+    String highParam = "tempHigh" + String(i + 1);
+    String autoParam = "auto" + String(i + 1);
+
+    if (request->hasParam(lowParam)) {
+      tempTriggersDown[i] = request->getParam(lowParam)->value().toFloat();
+    }
+    if (request->hasParam(highParam)) {
+      tempTriggersUp[i] = request->getParam(highParam)->value().toFloat();
+    }
+    autoEnabled[i] = request->hasParam(autoParam);
+
+    Serial.printf(
+      "Relay %d -> Low: %.2f°C | High: %.2f°C | Auto: %s\n",
+      i + 1,
+      tempTriggersDown[i],
+      tempTriggersUp[i],
+      autoEnabled[i] ? "ON" : "OFF"
+  );
+}
+
+request->redirect("/");
+
   });
+  // Start server
 
   delay(20000);
   server.begin();
@@ -136,37 +281,106 @@ void reconnect() {
 void temp(){
   sensors.requestTemperatures();
 
-  float temperatureC = sensors.getTempCByIndex(0);
+  float temps[RELAY_COUNT] = {
+    sensors.getTempC(sensor1),
+    sensors.getTempC(sensor2),
+    sensors.getTempC(sensor3),
+    sensors.getTempC(sensor4)
+  };
 
-  if (temperatureC == DEVICE_DISCONNECTED_C) 
+  if (temps[0] == DEVICE_DISCONNECTED_C) 
   {
     Serial.println("Error: DS18B20 not found!");
     return;
   } 
 
-  Serial.printf("Temperature: %.2f °C\n", temperatureC);
-  bool new_relay = (temperatureC > 26);
-
-  if(new_relay != relay)
+  for(int i=0;i<RELAY_COUNT;i++)
   {
-    relay = new_relay;
-    
-    digitalWrite(RELAY_FIRST, relay ? LOW : HIGH);
-    Serial.printf("Relay: %s\n", relay ? "On" : "Off");
+    Serial.printf("T%d: %.2f°C (Trig %.2f°C)\n", i+1, temps[i], tempTriggersDown[i]);
+    Serial.printf("T%d: %.2f°C (Trig %.2f°C)\n", i+1, temps[i], tempTriggersUp[i]);
 
-    if(client.connected())
+    if (autoEnabled[i]) 
     {
-      char relayMsg[32];
-      snprintf(relayMsg, sizeof(relayMsg), "Relay: %s", relay ? "On" : "Off");
-      client.publish(topic2,relayMsg);
+      bool shouldBeOn = temps[i] > tempTriggersUp[i];
+      bool shouldBeOff = temps[i] < tempTriggersDown[i];
+      bool currentState = getRelayState(i);
+
+      if (shouldBeOn && !currentState) 
+      {
+        digitalWrite(relayIO[i], LOW);
+        relayStates[i] = true;
+        Serial.printf("Auto Relay %d -> ON\n", i + 1);
+
+        if(client.connected())
+        {
+          char relayMsg[32];
+          snprintf(relayMsg, sizeof(relayMsg), "Auto Relay %d -> ON\n", i + 1);
+          client.publish(topic2,relayMsg);
+        }
+      } 
+      else if (shouldBeOff && currentState) 
+      {
+        digitalWrite(relayIO[i], HIGH);
+        relayStates[i] = false;
+        Serial.printf("Auto Relay %d -> OFF\n", i + 1);
+
+        if(client.connected())
+        {
+          char relayMsg[32];
+          snprintf(relayMsg, sizeof(relayMsg), "Auto Relay %d -> OFF\n", i + 1);
+          client.publish(topic2,relayMsg);
+        }
+      }
+
+      // for (int i = 0; i < RELAY_COUNT; i++) 
+      // {
+      //   bool shouldBeOn = (temps[i] < tempTriggersDown[i]);
+      //   bool shouldBeOff = (temps[i] > tempTriggersUp[i]);
+      //   bool currentState = getRelayState(i);
+
+      //   if (shouldBeOn != currentState) 
+      //   {
+      //     digitalWrite(relayIO[i], shouldBeOn ? LOW : HIGH);
+      //     relayStates[i] = shouldBeOn;
+      //     Serial.printf("Auto Relay %d -> %s\n", i + 1, shouldBeOn ? "ON" : "OFF");
+
+      //     if(client.connected())
+      //     {
+      //       char relayMsg[32];
+      //       snprintf(relayMsg, sizeof(relayMsg), "Auto Relay %d -> %s\n", i + 1, shouldBeOn ? "ON" : "OFF");
+      //       client.publish(topic2,relayMsg);
+      //     }
+      //   }
+      //   else if (shouldBeOff != currentState) 
+      //   {
+      //     digitalWrite(relayIO[i], shouldBeOff ? HIGH : LOW);
+      //     relayStates[i] = shouldBeOff;
+      //     Serial.printf("Auto Relay %d -> %s\n", i + 1, shouldBeOff ? "OFF" : "ON");
+
+      //     if(client.connected())
+      //     {
+      //       char relayMsg[32];
+      //       snprintf(relayMsg, sizeof(relayMsg), "Auto Relay %d -> %s\n", i + 1, shouldBeOff ? "OFF" : "ON");
+      //       client.publish(topic2,relayMsg);
+      //     }
+      //   }
+      // }
     }
-  }
+    else 
+    {
+      for (int i = 0; i < RELAY_COUNT; i++) 
+      {
+        relayStates[i] = getRelayState(i);
+      }
+    }
+  } 
+
+
   if(client.connected())
   {
-    char tempString[8];
-    dtostrf(temperatureC, 1, 2, tempString);
-
-    client.publish(topic1,tempString);
+    char payload[128];
+    snprintf(payload, sizeof(payload), "%.2f,%.2f,%.2f,%.2f", temps[0], temps[1], temps[2], temps[3]);
+    client.publish(topic1, payload);
   }
 }
 
@@ -175,7 +389,8 @@ void loop(){
   {
     reconnect();
   }
-  if (client.connected()) {
+  if (client.connected()) 
+  {
     client.loop();
   }
 
