@@ -8,6 +8,18 @@
 #include <ESPAsyncWebServer.h>
 #include <AsyncTCP.h>
 
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+#define SCREEN_WIDTH 128 // OLED display width, in pixels
+#define SCREEN_HEIGHT 64 // OLED display height, in pixels
+#define I2C_SDA 33
+#define I2C_SCL 32
+TwoWire I2CDisplay = TwoWire(1);
+// Declaration for an SSD1306 display connected to I2C (SDA, SCL pins)
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &I2CDisplay, -1);
+
 // DS18B20 data pin
 #define ONE_WIRE_BUS 4
 #define RELAY_COUNT 4
@@ -17,13 +29,17 @@ DallasTemperature sensors(&oneWire);
 
 DeviceAddress sensor1 = { 0x28, 0x80, 0xC9, 0x4A, 0x4, 0x0, 0x0, 0x40 };
 DeviceAddress sensor2 = { 0x28, 0xBB, 0xEA, 0x4A, 0x4, 0x0, 0x0, 0xE3 };
-DeviceAddress sensor3= { 0x28, 0xF3, 0xD5, 0x4A, 0x4, 0x0, 0x0, 0xDC };
+// DeviceAddress sensor3= { 0x28, 0xF3, 0xD5, 0x4A, 0x4, 0x0, 0x0, 0xDC };
 DeviceAddress sensor4= { 0x28, 0x4B, 0xE2, 0x4A, 0x4, 0x0, 0x0, 0xAF };
+DeviceAddress sensor3= { 0x28, 0x20, 0xE9, 0x4A, 0x4, 0x0, 0x0, 0xE4 };
+// DeviceAddress sensor4= { 0x28, 0x6B, 0xAC, 0x4A, 0x4, 0x0, 0x0, 0x52 };
+
+void callback(char* topic, byte* message, unsigned int length);
 
 WiFiClient conClient;
 PubSubClient client(conClient);
 
-const char *mqtt_broker = "192.168.1.154";
+const char *mqtt_broker = "192.168.1.230";
 const char *topic1 = "esp32/temp";
 const char *topic2 = "esp32/relay";
 const char *id = "esp32_Client";
@@ -31,6 +47,7 @@ const int mqtt_port = 1883;
 
 bool relay = false;
 float last_temp = 0;
+char temp_string[50];
 
 static bool eth_connected = false;
 
@@ -48,8 +65,6 @@ const char* PARAM_INPUT_TEMP = "temp";
 
 String enableAutoChecked = "";
 String inputMessage3 = "true";
-
-
 
 AsyncWebServer server(80);
 
@@ -76,7 +91,7 @@ const char index_html[] PROGMEM = R"rawliteral(
 
   <form action="/get">
     <table border="1" style="margin:auto;">
-      <tr><th>Relay</th><th>Trigger Low °C</th><th>Trigger High °C</th><th>Automation</th></tr>
+      <tr><th>Relay</th><th>Trigger Low C</th><th>Trigger High C</th><th>Automation</th></tr>
       %TEMPINPUTS%
     </table>
     <br>
@@ -115,6 +130,22 @@ String makeTempInputs() {
     inputs += "</tr>";
   }
   return inputs;
+}
+
+void initOLED(int num, float temp) 
+{
+
+
+  bool currentState = getRelayState(num);
+
+  memset(temp_string, 0, sizeof(temp_string));
+
+	sprintf(temp_string, "Temp %.1f C |Rl: %s", temp, currentState ? "ON" : "OFF");
+
+
+  display.setCursor(0, num*10);
+  display.println(temp_string);
+  display.display();
 }
 
 String processor(const String& var){
@@ -174,6 +205,16 @@ void setup(){
   //digitalWrite(RELAY_FIRST, HIGH);
   //ETH.begin();
 
+  delay(1000);
+
+  I2CDisplay.begin(I2C_SDA, I2C_SCL, 400000);
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C))
+  {
+    Serial.println(F("SSD1306 allocation failed"));
+    return;
+  }
+  delay(1000);
+  
   for (int i = 0; i < RELAY_COUNT; i++) 
   {
     pinMode(relayIO[i], OUTPUT);
@@ -186,10 +227,10 @@ void setup(){
   ETH.begin(1, 16, 23, 18, ETH_PHY_LAN8720, ETH_CLOCK_GPIO0_IN);
   #endif
   Serial.println("Ethernet starting");
-  Serial.println(ETH.localIP());
+  
 
   client.setServer(mqtt_broker, mqtt_port);
-
+  client.setCallback(callback);
 
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
   {
@@ -207,11 +248,22 @@ void setup(){
     digitalWrite(relayIO[r], s ? LOW : HIGH);
     relayStates[r] = getRelayState(r);
 
-    Serial.printf("Manual Relay %d -> %s\n", r + 1, relayStates[r] ? "ON" : "OFF");
+    Serial.printf("%s\n", relayStates[r] ? "ON" : "OFF");
 
-    char relayMsg[32];
-    snprintf(relayMsg, sizeof(relayMsg), "Manual Relay %d -> %s\n", r + 1, relayStates[r] ? "ON" : "OFF");
-    client.publish(topic2,relayMsg);
+    //char relayMsg[32];
+    //snprintf(relayMsg, sizeof(relayMsg), "Manual Relay %d -> %s\n", r + 1, relayStates[r] ? "ON" : "OFF");
+    //client.publish(topic2,relayMsg);
+
+    if (client.connected())
+    {
+      char topic[64];
+      snprintf(topic, sizeof(topic), "esp32/relay%d", r + 1);
+
+      char message[64];
+      snprintf(message, sizeof(message), "%s", relayStates[r] ? "ON" : "OFF");
+
+      client.publish(topic, message);
+    }
     }
     request->send(200, "text/plain", "OK");
   });
@@ -246,11 +298,20 @@ void setup(){
 request->redirect("/");
 
   });
+
+ 
+
   // Start server
 
   delay(20000);
   server.begin();
+
+  Serial.println(ETH.localIP());
+
+  
 }
+
+
 
 void reconnect() {
   static bool connecting = false;
@@ -265,6 +326,14 @@ void reconnect() {
   if (client.connect(id)) 
   {
     Serial.println("Connected");
+    for (int i = 0; i < RELAY_COUNT; i++) 
+    {
+      char topic[32];
+      snprintf(topic, sizeof(topic), "esp32/relayStatus%d", i + 1);
+      client.subscribe(topic);
+      Serial.print("Subscribed to: ");
+      Serial.println(topic);
+    }
     client.subscribe(topic1);
     client.subscribe(topic2);
   } 
@@ -280,6 +349,9 @@ void reconnect() {
 
 void temp(){
   sensors.requestTemperatures();
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
 
   float temps[RELAY_COUNT] = {
     sensors.getTempC(sensor1),
@@ -299,6 +371,19 @@ void temp(){
     Serial.printf("T%d: %.2f°C (Trig %.2f°C)\n", i+1, temps[i], tempTriggersDown[i]);
     Serial.printf("T%d: %.2f°C (Trig %.2f°C)\n", i+1, temps[i], tempTriggersUp[i]);
 
+    initOLED(i,temps[i]);
+
+      if (client.connected())
+      {
+        char payload[128];
+        snprintf(payload, sizeof(payload), "%.2f", temps[i]);
+        char topic1[64];
+        snprintf(topic1, sizeof(topic1), "topic/smth%d", i + 1);
+
+        client.publish(topic1, payload);
+      }
+
+
     if (autoEnabled[i]) 
     {
       bool shouldBeOn = temps[i] > tempTriggersUp[i];
@@ -313,8 +398,12 @@ void temp(){
 
         if(client.connected())
         {
+          
           char relayMsg[32];
-          snprintf(relayMsg, sizeof(relayMsg), "Auto Relay %d -> ON\n", i + 1);
+          snprintf(relayMsg, sizeof(relayMsg), "ON");
+          char topic2[64];
+          snprintf(topic2, sizeof(topic2), "esp32/relay%d", i + 1);
+          Serial.printf(relayMsg);
           client.publish(topic2,relayMsg);
         }
       } 
@@ -327,7 +416,10 @@ void temp(){
         if(client.connected())
         {
           char relayMsg[32];
-          snprintf(relayMsg, sizeof(relayMsg), "Auto Relay %d -> OFF\n", i + 1);
+          snprintf(relayMsg, sizeof(relayMsg), "OFF");
+          char topic2[64];
+          snprintf(topic2, sizeof(topic2), "esp32/relay%d", i + 1);
+          Serial.printf(relayMsg);
           client.publish(topic2,relayMsg);
         }
       }
@@ -374,13 +466,41 @@ void temp(){
       }
     }
   } 
+}
+
+void callback(char* topic, byte* message, unsigned int length)
+{
+
+  Serial.print("Message arrived in topic: ");
+  Serial.println(topic);
+  Serial.println("-----------------------");
+  String messageTemp;
+
+  for (int i = 0; i < length; i++) {
+    Serial.print((char)message[i]);
+    messageTemp += (char)message[i];
+  }
+  Serial.println();
 
 
-  if(client.connected())
-  {
-    char payload[128];
-    snprintf(payload, sizeof(payload), "%.2f,%.2f,%.2f,%.2f", temps[0], temps[1], temps[2], temps[3]);
-    client.publish(topic1, payload);
+  for (int i = 0; i < RELAY_COUNT; i++) {
+    String relayTopic = "esp32/relayStatus" + String(i + 1);
+    if (String(topic) == relayTopic) 
+    {
+      if (messageTemp == "ON") 
+      {
+        relayStates[i] = true;
+        digitalWrite(relayIO[i], LOW);
+      } 
+      else if (messageTemp == "OFF") 
+      {
+        relayStates[i] = false;
+        digitalWrite(relayIO[i], HIGH);
+      }
+
+      Serial.printf("Relay %d set to %s\n", i + 1, relayStates[i] ? "ON" : "OFF");
+      break;
+    }
   }
 }
 
